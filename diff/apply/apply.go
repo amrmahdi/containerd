@@ -75,8 +75,10 @@ func (s *fsApplier) Apply(ctx context.Context, desc ocispec.Descriptor, mounts [
 	}
 	defer ra.Close()
 
+	cr := content.NewReader(ra)
 	var processors []diff.StreamProcessor
-	processor := diff.NewProcessorChain(desc.MediaType, content.NewReader(ra))
+
+	processor := diff.NewProcessorChain(desc.MediaType, cr)
 	processors = append(processors, processor)
 	for {
 		if processor, err = diff.GetProcessor(ctx, processor, config.ProcessorPayloads); err != nil {
@@ -90,8 +92,17 @@ func (s *fsApplier) Apply(ctx context.Context, desc ocispec.Descriptor, mounts [
 	defer processor.Close()
 
 	digester := digest.Canonical.Digester()
-	rc := &readCounter{
-		r: io.TeeReader(processor, digester.Hash()),
+	dgst := desc.Digest
+	var rc *readCounter
+	if desc.MediaType != ocispec.MediaTypeImageLayer {
+		rc = &readCounter{
+			r: io.TeeReader(processor, digester.Hash()),
+		}
+	} else {
+		rc = &readCounter{
+			r: processor,
+			c: desc.Size,
+		}
 	}
 
 	if err := apply(ctx, mounts, rc); err != nil {
@@ -112,10 +123,15 @@ func (s *fsApplier) Apply(ctx context.Context, desc ocispec.Descriptor, mounts [
 			}
 		}
 	}
+	if desc.MediaType != ocispec.MediaTypeImageLayer {
+		dgst = digester.Digest()
+	}
+	log.L.WithField("calculated", dgst).WithField("incoming", desc.Digest).WithField("media", desc.MediaType).Info("digests")
+
 	return ocispec.Descriptor{
 		MediaType: ocispec.MediaTypeImageLayer,
 		Size:      rc.c,
-		Digest:    digester.Digest(),
+		Digest:    dgst,
 	}, nil
 }
 
